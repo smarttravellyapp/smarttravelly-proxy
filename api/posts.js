@@ -3,23 +3,36 @@ export default async function handler(req, res) {
 
   try {
     const response = await fetch(url, {
-      headers: { 'User-Agent': 'SmartTravelly-Proxy' }
+      headers: {
+        'User-Agent': 'SmartTravelly-Proxy',
+        'Accept': 'application/json'
+      },
+      next: { revalidate: 43200 } // Cache 12h tự động (Edge-friendly)
     });
 
     if (!response.ok) {
-      throw new Error(`Fetch error: ${response.status} ${response.statusText}`);
+      console.error(`❌ Fetch error: ${response.status} ${response.statusText}`);
+      return res.status(response.status).json({
+        success: false,
+        message: `WordPress API returned ${response.status}`
+      });
     }
 
     const data = await response.json();
 
-    // Cache 12h trên Vercel Edge CDN
+    // Cache 12h trên CDN
     res.setHeader('Cache-Control', 's-maxage=43200, stale-while-revalidate');
-    res.status(200).json(data);
+    res.status(200).json({
+      success: true,
+      count: data.length,
+      posts: data
+    });
 
   } catch (error) {
+    console.error(`🔥 Proxy error: ${error.message}`);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch posts',
+      message: 'Failed to fetch posts from WordPress',
       error: error.message
     });
   }
