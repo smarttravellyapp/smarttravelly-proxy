@@ -7,7 +7,7 @@ export default async function handler(req, res) {
         'User-Agent': 'SmartTravelly-Proxy',
         'Accept': 'application/json'
       },
-      next: { revalidate: 43200 } // Cache 12h tự động (Edge-friendly)
+      next: { revalidate: 43200 } // Cache 12h
     });
 
     if (!response.ok) {
@@ -20,7 +20,6 @@ export default async function handler(req, res) {
 
     const data = await response.json();
 
-    // Cache 12h trên CDN
     res.setHeader('Cache-Control', 's-maxage=43200, stale-while-revalidate');
     res.status(200).json({
       success: true,
