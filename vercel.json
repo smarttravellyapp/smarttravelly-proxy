@@ -9,7 +9,7 @@
   },
   "crons": [
     {
-      "path": "/api/posts",
+      "path": "/api/posts-cron",
       "schedule": "0 */12 * * *"
     }
   ],
