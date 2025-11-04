@@ -1,6 +1,33 @@
 {
   "version": 2,
+  "functions": {
+    "api/**/*.js": {
+      "maxDuration": 60,
+      "memory": 512,
+      "runtime": "nodejs18.x"
+    }
+  },
   "routes": [
-    { "src": "/api/posts", "dest": "/api/posts.js" }
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/posts",
+      "schedule": "0 */12 * * *"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type" },
+        { "key": "Cache-Control", "value": "public, s-maxage=43200, stale-while-revalidate=3600" }
+      ]
+    }
   ]
 }
