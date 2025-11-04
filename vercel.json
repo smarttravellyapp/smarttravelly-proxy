@@ -7,6 +7,16 @@
       "maxDuration": 60
     }
   },
+  "routes": [
+    {
+      "src": "/api/posts",
+      "dest": "/api/posts.js"
+    },
+    {
+      "src": "/api/posts-cron",
+      "dest": "/api/posts-cron.js"
+    }
+  ],
   "crons": [
     {
       "path": "/api/posts-cron",
