@@ -1,86 +1,94 @@
-// api/posts.js
+// api/posts.js - Pages Router
 export default async function handler(req, res) {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  const REST_API = 'https://smarttravelly.com/wp-json/wp/v2/posts?per_page=50&_embed';
-  const RSS_FEED = 'https://smarttravelly.com/feed/';
+  const BASE_URL = 'https://smarttravelly.com/wp-json/wp/v2/posts';
+  const PER_PAGE = 100; // Max WordPress
+  const CACHE_SECONDS = 43200; // 12h
 
   try {
-    console.log('Starting fetch from SmartTravelly...');
+    console.log('Starting full fetch from SmartTravelly...');
 
-    // 1. REST API - headers giống Googlebot + bypass CF
-    const restPosts = await fetchREST(REST_API);
-    if (restPosts.length > 0) {
-      return sendResponse(res, {
-        success: true,
-        count: restPosts.length,
-        posts: restPosts,
-        refreshed: new Date().toISOString(),
-        source: 'rest-api',
-      });
+    const allPosts = [];
+    let page = 1;
+    let hasMore = true;
+
+    while (hasMore) {
+      const url = `${BASE_URL}?per_page=${PER_PAGE}&page=${page}&_embed=1`;
+      const posts = await fetchPage(url, page);
+
+      if (posts.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      allPosts.push(...posts);
+      console.log(`Page ${page}: +${posts.length} posts (Total: ${allPosts.length})`);
+
+      // Dừng nếu < PER_PAGE → hết dữ liệu
+      if (posts.length < PER_PAGE) {
+        hasMore = false;
+      } else {
+        page++;
+        // Delay nhẹ để tránh rate-limit
+        await new Promise(r => setTimeout(r, 300));
+      }
     }
 
-    // 2. Fallback RSS
-    const rssPosts = await fetchRSS(RSS_FEED);
-    if (rssPosts.length > 0) {
-      return sendResponse(res, {
-        success: true,
-        count: rssPosts.length,
-        posts: rssPosts,
-        refreshed: new Date().toISOString(),
-        source: 'rss-feed',
-      });
-    }
-
-    // 3. Không có data
-    return sendResponse(res, {
+    const response = {
       success: true,
-      count: 0,
-      posts: [],
+      count: allPosts.length,
+      posts: allPosts,
       refreshed: new Date().toISOString(),
-      source: 'none',
-      message: 'No articles found at the moment. Please check back later.',
-    });
+      source: 'rest-api-full',
+      pages_fetched: page,
+    };
+
+    return sendResponse(res, response, CACHE_SECONDS);
 
   } catch (error) {
-    console.error('Handler error:', error.message);
+    console.error('Full fetch failed:', error.message);
     return res.status(500).json({
       success: false,
-      message: 'Internal server error',
-      error: 'Fetch failed',
+      message: 'Failed to fetch all posts',
+      error: error.message,
       refreshed: new Date().toISOString(),
     });
   }
 }
 
-// === FETCH REST API (Bypass Cloudflare) ===
-async function fetchREST(url) {
+// === LẤY 1 TRANG (với bypass Cloudflare) ===
+async function fetchPage(url, page) {
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
     const response = await fetch(url, {
-      method: 'GET',
+      signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'application/json',
         'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
         'Referer': 'https://smarttravelly.com/',
         'Origin': 'https://smarttravelly.com',
-        'Connection': 'keep-alive',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
       },
-      redirect: 'follow',
-      cache: 'no-store',
     });
+
+    clearTimeout(timeout);
 
     const text = await response.text();
 
-    // Nếu bị chặn → trả HTML
-    if (text.includes('403') || text.includes('Cloudflare') || text.includes('cf-ray')) {
-      console.warn('Blocked by Cloudflare (REST)');
+    // Bị Cloudflare chặn?
+    if (response.status === 403 || text.includes('Cloudflare') || text.includes('cf-ray') || text.includes('Attention Required')) {
+      console.warn(`Page ${page} blocked by Cloudflare`);
+      return [];
+    }
+
+    if (!response.ok) {
+      console.warn(`Page ${page} HTTP ${response.status}`);
       return [];
     }
 
@@ -88,74 +96,47 @@ async function fetchREST(url) {
     try {
       data = JSON.parse(text);
     } catch (e) {
-      console.warn('Invalid JSON (REST):', e.message);
+      console.warn(`Page ${page} JSON parse error`);
       return [];
     }
 
     if (!Array.isArray(data)) return [];
 
-    const posts = [];
-    for (const p of data.slice(0, 20)) {
-      if (!p?.id || !p?.link) continue;
+    return data.map(p => ({
+      id: p.id,
+      title: clean(p.title?.rendered || ''),
+      link: p.link,
+      date: p.date,
+      excerpt: truncate(clean(p.excerpt?.rendered || ''), 280),
+      image: getFeaturedImage(p),
+    })).filter(p => p.title && p.link);
 
-      const image = p._embedded?.['wp:featuredmedia']?.[0]?.source_url || null;
-
-      posts.push({
-        id: p.id,
-        title: clean(p.title?.rendered || ''),
-        link: p.link,
-        date: p.date,
-        excerpt: truncate(clean(p.excerpt?.rendered || ''), 250),
-        image,
-      });
-    }
-
-    return posts;
   } catch (error) {
-    console.error('REST fetch failed:', error.message);
+    if (error.name === 'AbortError') {
+      console.warn(`Page ${page} timeout`);
+    } else {
+      console.error(`Page ${page} error:`, error.message);
+    }
     return [];
   }
 }
 
-// === FETCH RSS (Fallback) ===
-async function fetchRSS(url) {
+// === LẤY ẢNH ĐẸP NHẤT ===
+function getFeaturedImage(p) {
   try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-        'Accept': 'application/rss+xml, application/xml',
-      },
-      cache: 'no-store',
-    });
+    const media = p._embedded?.['wp:featuredmedia']?.[0];
+    if (!media) return null;
 
-    const text = await response.text();
-    if (!text.includes('<rss') && !text.includes('<feed')) return [];
-
-    const items = text.split('<item>').slice(1).slice(0, 15);
-    const posts = [];
-
-    for (const item of items) {
-      const title = extract(item, 'title');
-      const link = extract(item, 'link');
-      const date = extract(item, 'pubDate');
-      const desc = extract(item, 'description') || extract(item, 'content:encoded');
-      const image = extractImage(item);
-
-      if (link && title) {
-        posts.push({
-          id: Date.now() + Math.random(),
-          title: clean(title),
-          link: link.replace(/utm_.*$/, ''),
-          date: date ? new Date(date).toISOString() : new Date().toISOString(),
-          excerpt: truncate(clean(desc), 250),
-          image,
-        });
-      }
-    }
-
-    return posts;
+    const sizes = media.media_details?.sizes;
+    return (
+      sizes?.large?.source_url ||
+      sizes?.medium_large?.source_url ||
+      sizes?.medium?.source_url ||
+      media.source_url ||
+      null
+    );
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -164,23 +145,15 @@ function clean(str = '') {
   return str.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
 }
 
-function truncate(str = '', len = 250) {
+function truncate(str = '', len = 280) {
   return str.length > len ? str.slice(0, len) + '...' : str;
 }
 
-function extract(str, tag) {
-  const match = str.match(new RegExp(`<${tag}[^>]*>(<!\\[CDATA\\[)?(.*?)(\\]\\]>)?</${tag}>`, 'is'));
-  return match ? (match[2] || match[3] || '').trim() : '';
-}
-
-function extractImage(str) {
-  const match = str.match(/src=["']([^"']+\.(jpe?g|png|gif|webp))["']/i);
-  return match ? match[1] : null;
-}
-
-function sendResponse(res, data) {
+function sendResponse(res, data, cacheSeconds = 43200) {
   res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Cache-Control', data.count > 0 ? 's-maxage=43200, stale-while-revalidate=3600' : 'no-cache');
+  res.setHeader('Cache-Control', `public, s-maxage=${cacheSeconds}, stale-while-revalidate=3600`);
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('X-Source', data.source);
+  res.setHeader('X-Total-Posts', data.count);
   return res.status(200).json(data);
 }
