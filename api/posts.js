@@ -4,53 +4,66 @@ export default async function handler(req, res) {
   try {
     const response = await fetch(url, {
       headers: {
-        "User-Agent": "SmartTravelly-Proxy",
-        "Accept": "application/json"
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://smarttravelly.com/"
       },
-      cache: "no-store" // luôn lấy mới, không dính cache sai
+      cache: "no-store"
     });
 
-    // Nếu lỗi từ WordPress
+    const text = await response.text();
+
     if (!response.ok) {
-      console.error(`❌ Fetch error: ${response.status} ${response.statusText}`);
-      res.status(response.status).json({
+      console.error(`❌ ${response.status} ${response.statusText}`);
+      return res.status(response.status).json({
         success: false,
-        message: `WordPress API returned ${response.status} ${response.statusText}`
+        message: `WordPress API returned ${response.status}`,
+        raw: text.slice(0, 200)
       });
-      return;
     }
 
-    const data = await response.json();
-
-    // Kiểm tra dữ liệu có đúng định dạng không
-    if (!Array.isArray(data)) {
-      console.error("❌ Invalid JSON structure from WordPress");
-      res.status(502).json({
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      console.error("⚠️ Invalid JSON returned, probably HTML page");
+      return res.status(502).json({
         success: false,
-        message: "Received invalid data structure from WordPress"
+        message: "Invalid JSON from WordPress (likely HTML output)",
+        preview: text.slice(0, 200)
       });
-      return;
     }
 
-    // Trả về JSON hợp lệ cho App hoặc Google Studio
+    // Kiểm tra có bài viết không
+    if (!Array.isArray(data) || data.length === 0) {
+      console.warn("⚠️ No posts found from WordPress");
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        posts: [],
+        refreshed: new Date().toISOString()
+      });
+    }
+
+    const posts = data.map((p) => ({
+      id: p.id,
+      title: p.title?.rendered || "",
+      link: p.link,
+      date: p.date,
+      excerpt: p.excerpt?.rendered?.replace(/<[^>]+>/g, "").trim() || "",
+      image: p._embedded?.["wp:featuredmedia"]?.[0]?.source_url || null
+    }));
+
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Cache-Control", "s-maxage=43200, stale-while-revalidate");
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      source: "smarttravelly.com",
-      count: data.length,
+      count: posts.length,
       refreshed: new Date().toISOString(),
-      posts: data.map(p => ({
-        id: p.id,
-        title: p.title.rendered,
-        link: p.link,
-        date: p.date,
-        excerpt: p.excerpt?.rendered?.replace(/<[^>]+>/g, "").trim(),
-        image: p._embedded?.["wp:featuredmedia"]?.[0]?.source_url || null
-      }))
+      posts
     });
 
   } catch (error) {
