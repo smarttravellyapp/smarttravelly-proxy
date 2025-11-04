@@ -1,228 +1,224 @@
-// app/api/posts/route.js
-import { NextResponse } from "next/server";
-
-// === CẤU HÌNH ===
-const REST_API = "https://smarttravelly.com/wp-json/wp/v2/posts?per_page=100&_embed";
-const RSS_FEED = "https://smarttravelly.com/feed/";
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 1000; // Giảm để nhanh
-const CACHE_SECONDS = 43200;
-
-// XÓA EDGE CONFIG: Dùng Node.js runtime
-export const dynamic = "force-dynamic";
-
-// === UTILS (Robust) ===
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const cleanHTML = (html = "") => html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-
-const truncate = (str = "", len = 280) => str.length > len ? str.slice(0, len) + "..." : str;
-
-const getFeaturedImage = (p) => {
-  try {
-    return (
-      p._embedded?.["wp:featuredmedia"]?.[0]?.media_details?.sizes?.large?.source_url ||
-      p._embedded?.["wp:featuredmedia"]?.[0]?.source_url ||
-      null
-    );
-  } catch {
-    return null;
+// api/posts.js (Pages Router - Vercel/Next.js)
+export default async function handler(req, res) {
+  // Chỉ GET
+  if (req.method !== 'GET') {
+    res.setHeader('Allow', ['GET']);
+    return res.status(405).end(`Method ${req.method} Not Allowed`);
   }
-};
 
-const isHTMLResponse = (text) =>
-  text.includes("<html") || text.includes("<!DOCTYPE") || text.includes("<body") || text.includes("cf-ray");
+  // Config
+  const REST_API = 'https://smarttravelly.com/wp-json/wp/v2/posts?per_page=100&_embed';
+  const RSS_FEED = 'https://smarttravelly.com/feed/';
+  const MAX_RETRIES = 3;
 
-// === MAIN HANDLER ===
-export async function GET() {
   try {
-    console.log("🚀 Starting SmartTravelly fetch...");
+    console.log('🚀 Starting fetch...');
 
-    // 1. REST API
+    // 1. REST API với retry
     const restResult = await fetchWithRetry(REST_API);
-    if (restResult.success && restResult.posts?.length > 0) {
-      console.log(`✅ REST: ${restResult.posts.length} posts fetched`);
-      return cacheResponse({
+    if (restResult.success && restResult.posts && restResult.posts.length > 0) {
+      console.log(`✅ REST success: ${restResult.posts.length} posts`);
+      return sendResponse(res, {
         success: true,
         count: restResult.posts.length,
         posts: restResult.posts,
         refreshed: new Date().toISOString(),
-        source: "rest-api",
+        source: 'rest-api',
       });
     }
 
-    console.warn("⚠️ REST failed, trying RSS...");
+    console.warn('⚠️ REST failed, trying RSS...');
 
     // 2. RSS Fallback
     const rssResult = await fetchRSS(RSS_FEED);
-    if (rssResult.success && rssResult.posts?.length > 0) {
-      console.log(`✅ RSS: ${rssResult.posts.length} posts fetched`);
-      return cacheResponse({
+    if (rssResult.success && rssResult.posts && rssResult.posts.length > 0) {
+      console.log(`✅ RSS success: ${rssResult.posts.length} posts`);
+      return sendResponse(res, {
         success: true,
         count: rssResult.posts.length,
         posts: rssResult.posts,
         refreshed: new Date().toISOString(),
-        source: "rss-feed",
+        source: 'rss-feed',
       });
     }
 
     // 3. Empty
-    console.warn("⚠️ No data from any source");
-    return cacheResponse({
+    console.warn('⚠️ No data');
+    return sendResponse(res, {
       success: true,
       count: 0,
       posts: [],
       refreshed: new Date().toISOString(),
-      source: "none",
-      message: "No articles found at the moment. Please check back later.",
+      source: 'none',
+      message: 'No articles found at the moment. Please check back later.',
     });
+
   } catch (error) {
-    console.error("💥 CRITICAL ERROR:", error.message, error.stack);
-    return NextResponse.json(
-      {
-        success: false,
-        count: 0,
-        posts: [],
-        refreshed: new Date().toISOString(),
-        source: "error",
-        message: "Internal fetch error. Check logs.",
-        error: process.env.NODE_ENV === "development" ? error.message : "Unknown error",
-      },
-      { status: 500 }
-    );
+    console.error('💥 Handler error:', error.message, error.stack);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Unknown',
+      refreshed: new Date().toISOString(),
+    });
   }
 }
 
-// === ROBUST FETCH + RETRY ===
+// Robust fetch + retry
 async function fetchWithRetry(url, attempt = 0) {
   try {
-    const res = await fetch(url, {
+    const response = await fetch(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-        Accept: "application/json, text/plain, */*",
-        Referer: "https://smarttravelly.com/",
-        Origin: "https://smarttravelly.com",
+        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://smarttravelly.com/',
+        'Origin': 'https://smarttravelly.com',
       },
-      next: { revalidate: CACHE_SECONDS },
+      cache: 'no-store', // No cache cho retry
     });
 
-    console.log(`Fetch attempt ${attempt + 1}: Status ${res.status}, Size ~${res.headers.get("content-length") || "unknown"}`);
+    console.log(`Attempt ${attempt + 1}: Status ${response.status}`);
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
     }
 
-    const text = await res.text();
-    if (isHTMLResponse(text)) {
-      throw new Error("HTML response (blocked or malformed)");
+    const text = await response.text();
+
+    // Check HTML block
+    if (isHTML(text)) {
+      throw new Error('HTML response detected');
     }
 
+    // Parse JSON safe
     let data;
     try {
       data = JSON.parse(text);
-    } catch (parseErr) {
-      console.warn("Parse fail:", parseErr.message.slice(0, 100));
-      throw new Error("Invalid JSON");
+    } catch (parseError) {
+      console.warn('JSON parse fail:', parseError.message);
+      throw new Error('Invalid JSON');
     }
 
     if (!Array.isArray(data)) {
-      throw new Error("Not an array");
+      throw new Error('Response not array');
     }
 
+    // Map posts safe
     const posts = data
-      .filter((p) => p?.id && p?.link)
-      .slice(0, 50) // Giới hạn
-      .map((p) => ({
+      .slice(0, 30) // Limit
+      .filter(p => p && p.id && p.link)
+      .map(p => ({
         id: p.id,
-        title: cleanHTML(p.title?.rendered || p.title || ""),
+        title: cleanText(p.title?.rendered || ''),
         link: p.link,
         date: p.date,
-        excerpt: truncate(cleanHTML(p.excerpt?.rendered || "")),
-        image: getFeaturedImage(p),
+        excerpt: truncate(cleanText(p.excerpt?.rendered || ''), 280),
+        image: getImage(p),
       }))
-      .filter((post) => post.title); // Loại empty
+      .filter(post => post.title.length > 0); // Valid only
 
     if (posts.length === 0 && attempt < MAX_RETRIES - 1) {
-      await sleep(RETRY_DELAY);
+      // Simple delay without sleep (edge-safe)
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
       return fetchWithRetry(url, attempt + 1);
     }
 
     return { success: true, posts };
+
   } catch (error) {
     console.error(`Fetch error (attempt ${attempt + 1}):`, error.message);
     if (attempt < MAX_RETRIES - 1) {
-      await sleep(RETRY_DELAY * (attempt + 1));
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
       return fetchWithRetry(url, attempt + 1);
     }
     return { success: false };
   }
 }
 
-// === ROBUST RSS (Dùng DOM parser thay regex) ===
+// Simple RSS fetch
 async function fetchRSS(url) {
   try {
-    // Simple fetch, no retry for fallback
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Googlebot" },
-      next: { revalidate: 3600 },
+    const response = await fetch(url, {
+      headers: { 'User-Agent': 'Googlebot' },
+      cache: 'no-store',
     });
 
-    if (!res.ok) return { success: false };
+    if (!response.ok) return { success: false };
 
-    const text = await res.text();
-    if (text.includes("<html")) return { success: false };
+    const text = await response.text();
+    if (isHTML(text)) return { success: false };
 
-    // Parse XML như string (không dùng lib ngoài)
-    const parser = new DOMParser(); // Node.js không có, dùng string split
-    const items = text.split("<item>").slice(1); // Simple split
+    // Simple string parse for RSS items
+    const items = text.split('<item>').slice(1).slice(0, 20);
     const posts = [];
 
-    for (const itemStr of items.slice(0, 20)) {
+    for (const item of items) {
       try {
-        const titleMatch = itemStr.match(/<title[^>]*>([^<]+|<!\[CDATA\[([^\]]*)\]\]>)<\/title>/i);
-        const title = (titleMatch?.[1] || titleMatch?.[2] || "").trim();
-        
-        const linkMatch = itemStr.match(/<link[^>]*>([^<]+)<\/link>/i);
-        const link = linkMatch?.[1]?.trim();
-
-        const dateMatch = itemStr.match(/<pubDate[^>]*>([^<]+)<\/pubDate>/i);
-        const date = dateMatch?.[1] ? new Date(dateMatch[1]).toISOString() : new Date().toISOString();
-
-        const descMatch = itemStr.match(/<(description|content:encoded)[^>]*>([^<]+|<!\[CDATA\[([\s\S]*?)\]\]>)<\/\1>/i);
-        let desc = (descMatch?.[2] || descMatch?.[3] || "").replace(/<[^>]+>/g, "").trim();
-        desc = truncate(cleanHTML(desc));
-
-        const imgMatch = itemStr.match(/<enclosure[^>]+url=["']([^"']+\.(jpe?g|png|gif|webp))["']/i) ||
-                         itemStr.match(/src=["']([^"']+\.(jpe?g|png|gif|webp))["']/i);
-        const image = imgMatch?.[1];
+        const title = extract(item, 'title');
+        const link = extract(item, 'link');
+        const dateStr = extract(item, 'pubDate');
+        const desc = extract(item, 'description') || extract(item, 'content:encoded');
+        const excerpt = truncate(cleanText(desc), 280);
+        const image = extractImage(item);
 
         if (link && title) {
           posts.push({
-            id: link.split("/").pop().replace(/\D/g, "") || Date.now(),
-            title: cleanHTML(title),
-            link: link.replace(/utm_.*$/, ""),
-            date,
-            excerpt: desc,
+            id: link.split('/').pop().replace(/\D/g, '') || Date.now(),
+            title: cleanText(title),
+            link: link.replace(/utm_.*/, ''),
+            date: dateStr ? new Date(dateStr).toISOString() : new Date().toISOString(),
+            excerpt,
             image,
           });
         }
-      } catch (itemErr) {
-        console.warn("RSS item parse skip:", itemErr.message);
+      } catch {
+        // Skip bad item
       }
     }
 
     return { success: posts.length > 0, posts };
-  } catch (error) {
-    console.error("RSS full fail:", error.message);
+
+  } catch {
     return { success: false };
   }
 }
 
-// === CACHE ===
-function cacheResponse(data) {
-  const response = NextResponse.json(data, { status: data.success ? 200 : 502 });
-  response.headers.set("Cache-Control", `public, s-maxage=${data.count > 0 ? CACHE_SECONDS : 300}, stale-while-revalidate=1800`);
-  response.headers.set("Access-Control-Allow-Origin", "*");
-  response.headers.set("X-Source", data.source || "unknown");
-  return response;
+// Utils
+function isHTML(text) {
+  return text.includes('<html') || text.includes('<!DOCTYPE') || text.includes('cf-ray') || text.includes('403');
+}
+
+function cleanText(str = '') {
+  return str.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function truncate(str, len) {
+  return str.length > len ? str.slice(0, len) + '...' : str;
+}
+
+function getImage(p) {
+  try {
+    return p._embedded?.['wp:featuredmedia']?.[0]?.source_url || null;
+  } catch {
+    return null;
+  }
+}
+
+function extract(item, tag) {
+  const match = item.match(new RegExp(`<${tag}[^>]*>([^<]+|<!\\[CDATA\\[[^\\]]*\\]\\]>)<`));
+  return match ? (match[1] || match[2] || '').replace(/<!\[CDATA\[(.*)\]\]>/, '$1').trim() : '';
+}
+
+function extractImage(item) {
+  const match = item.match(/src=["']([^"']+\.(jpg|png|gif|webp))["']/i) || item.match(/<enclosure[^>]+url=["']([^"']+\.(jpg|png|gif|webp))["']/i);
+  return match ? match[1] : null;
+}
+
+function sendResponse(res, data) {
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', `public, s-maxage=${data.count > 0 ? 43200 : 300}, stale-while-revalidate=1800`);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('X-Source', data.source || 'unknown');
+  return res.status(200).json(data);
 }
